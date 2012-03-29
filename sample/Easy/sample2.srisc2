@@ -1,0 +1,10 @@
+1: LWI   r1, 99
+2: LW    r2, 0[r1]  ; Memory load
+3: ICMP  r0, r2
+4: BNEQ  5          ; Branch instruction ignored
+5: SW    r2, 3[r1]  ; Memory store
+6: JUMP  2          ; Jump instruction ignored
+7: LW    r2, 5[r1]  ; Memory load
+8: IADD  r1, r1, r0 ; Ops, r1 value seems to be destroyed!-.
+9: SW    r2, 5[r1]  ; Memory store
+10: HALT

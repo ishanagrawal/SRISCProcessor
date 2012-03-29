@@ -1,0 +1,50 @@
+#include <string>
+#include "Processor.h"
+
+using namespace std;
+
+string configPath, assemblyPath;
+
+void getStrings(int __argc, char* __argv[])
+{
+	configPath = "config.dat";
+	assemblyPath = "sample.srisc2";
+
+	string temp = "";
+
+	if(__argc >= 2 ) {
+		temp = __argv[1];
+		assemblyPath = temp;
+	}	
+}
+
+int main(int argc, char *argv[])
+{
+	if(argc < 2) {
+		cerr << "[Instruction File Path] Missing paramter!\n";
+		return 1;
+	}
+
+	getStrings(argc, argv);
+	//configPath = "..\\sample\\" + (string)argv[1] + "\\config.dat";
+	//assemblyPath = "..\\sample\\" + (string)argv[1] + "\\sample.srisc2";
+
+	Retriever retriever;
+        //cout<<"\nConfig: "<<configPath;
+        //cout<<"\nAssembly: "<<assemblyPath;
+	if(retriever.loadInstructions(configPath, assemblyPath) == false)
+	{
+		cerr << "Input file not found!\n";
+		return 1;
+	}
+	if(retriever.loadConfigParams() == false)
+	{
+		cerr << "Error reading config file or memory file!\n";
+		return 1;
+	}
+
+	Processor proc(&retriever);
+	proc.execute();
+
+	return 0;
+}

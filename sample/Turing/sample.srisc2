@@ -1,0 +1,26 @@
+1: LWI r31, 1
+2: LWI r17 99
+3: LW r1, 5[r17]         ; r1 is unknown
+4: IADD r2, r31, r1      ; r2 = 1 + r1 (as r31 = 1)
+5: IADD r3, r31, r2      ; r3 = r2 + 1 (r3 = r1 + 2)
+6: IADD r4, r31, r3      ; r4 = r3 + 1 (r4 = r1 + 3)
+7: LWI r30, 2
+8: LWI r29, 3
+9: ISUB r5, r3, r29      ; r5 = r3 - 3 (r5 = r1 - 1)
+10: LW r16, 1[r4]        
+11: IADD r6, r2, r30      ; r6 = r2 + 2 (r2 = r1 + 3)
+12: IADD r7, r6, r31     ; r7 = r6 + 1 (r7 = r1 + 4)
+13: IADD r8, r6, r30     ; r8 = r6 + 2 (r8 = r1 + 5)
+14: LW r16, 10[r5]
+15: SW r16, 2[r7]
+16: ISUB r9, r31, r1     ; r9 = 1 - r1
+17: IADD r10, r9, r31    ; r10 = r9 + 1  (r10 = 2 - r1)
+18: ISUB r11, r30, r9    ; r11 = 2 - r9  (r11 = r1 + 1)
+19: LW r16, 5[r11]
+20: IADD r12, r30, r11   ; r12 = 2 + r11 (r12 = r1 + 3)
+21: LW r16, 0[r10]       ; r10 = 2 - r1 (from above)
+22: LW r16, 1[r9]        ; r9+1 = 2 - r1 
+23: IADD r1, r20, r21    ; r1 is unknown - dirtied
+24: LW r16, 6[r9]
+25: ISUB r10, r30, r1    ; r10 = 2 - r1 (dirtied)
+26: LW r16, 0[r10]

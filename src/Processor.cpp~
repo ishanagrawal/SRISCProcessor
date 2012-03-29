@@ -1,0 +1,629 @@
+#include "Processor.h"
+
+bool isDeducable(Relation rel)
+{
+	return ( rel.op == ISUB && rel.order == SrcOpValue);
+}
+
+Processor::Processor(Retriever *r) 
+{
+	PC=0;	
+        
+	retriever = r;
+	instructions = r->getInstructions();
+	memBanks = r->getMemBanks();
+	mem.clear();
+	prevMem.PC = -1;
+	reg[0].alive = true;
+
+	fout.open("result.disambiguator");
+}
+
+Type Processor::getEnumFromString(string instr)
+{
+	if( instr == "LW" ) return LW;
+	else if( instr == "SW" ) return SW;
+	else if( instr == "LWI" ) return LWI;
+	else if( instr == "IADD" ) return IADD;
+	else if( instr == "ISUB" ) return ISUB;
+	else if( instr == "IMUL" ) return IMUL;
+	else if( instr == "IDIV" ) return IDIV;
+	else if( instr == "IMOD" ) return IMOD;
+	else if( instr == "ICMP" ) return ICMP;
+	else if( instr == "BNEQ" ) return BNEQ;
+	else if( instr == "BEQ" ) return BEQ;
+	else if( instr == "BLT" ) return BLT;
+	else if( instr == "BGT" ) return BGT;
+	else if( instr == "JUMP" ) return JUMP;
+	else return HALT;
+}
+
+string Processor::getStringFromEnum(Type type)
+{
+	if( type == LW ) return "LW";
+	else if( type == SW ) return "SW";
+	else if( type == LWI ) return "LWI";
+	else if( type == IADD ) return "IADD";
+	else if( type == ISUB ) return "ISUB";
+	else if( type == IMUL ) return "IMUL";
+	else if( type == IDIV ) return "IDIV";
+	else if( type == IMOD ) return "IMOD";
+	else if( type == ICMP ) return "ICMP";
+	else if( type == BNEQ ) return "BNEQ";
+	else if( type == BEQ ) return "BEQ";
+	else if( type == BLT ) return "BLT";
+	else if( type == BGT ) return "BGT";
+	else if( type == JUMP ) return "JUMP";
+	else return "HALT";
+}
+
+string Processor::getStringFromResult(Result result)
+{
+    switch(result)
+    {
+        case ignored: return "ignored";
+        case YES: return "YES";
+        case MAYBE: return "MAYBE";
+        case NO: return "NO";
+    }
+
+	return "MAYBE";
+}
+
+void Processor::execute()
+{
+	StageBuffer buf;
+    Result result;
+        
+	for (unsigned int i=0; i < instructions.size(); i++)
+	{
+		buf.rel.reset();
+		buf.address = -1;
+        ID(buf);
+        ALU(buf);
+        if(buf.IR.isMemInstruction())
+        {
+            currentMem = buf;
+            result = applyAllRules(currentMem, prevMem);
+			if(result != ignored)
+				fout<< currentMem.PC+1 << ":" << prevMem.PC+1 << "=" << getStringFromResult(result) << "\n";
+			currentMem.amIdirty = reg[currentMem.IR.sReg1].dirtyNo;
+            prevMem = currentMem;
+        }
+        PC++;
+	}
+
+	fout.close();
+}
+
+Result Processor::applyAllRules(StageBuffer &currentMem, StageBuffer &prevMem)
+{
+    Result result = MAYBE;
+    
+	if( (currentMem.IR.sReg1 == prevMem.IR.sReg1 && prevMem.amIdirty != reg[currentMem.IR.sReg1].dirtyNo) ||
+		currentMem.IR.sReg1 != prevMem.IR.sReg1)
+		currentMem.rel = getAbsSrc( currentMem.IR.sReg1, currentMem);
+	else if (currentMem.IR.sReg1 == prevMem.IR.sReg1 && prevMem.amIdirty == reg[currentMem.IR.sReg1].dirtyNo)
+		currentMem.rel = prevMem.rel;
+	//prevMem.rel = recomputePath( prevMem, prevMem.path.size() - 1);
+
+	result = checkMemBanks(currentMem, prevMem);
+    if(result != MAYBE)
+		return result;
+	
+	result = sameMemAddrReg(currentMem, prevMem);
+    if(result != MAYBE)
+		return result;
+
+	result = directAddrRegDependency(currentMem, prevMem);
+    if(result != MAYBE)
+		return result;
+
+	result = multiLevelIndirection(currentMem, prevMem);
+	if(result != MAYBE)
+		return result;
+
+	return result;
+}
+
+// Rule 1
+
+Result Processor::checkMemBanks(StageBuffer &currentMem, StageBuffer &prevMem)
+{
+    //check if instruction are SW or LW and check accordingly
+    if(prevMem.PC == -1)
+    {
+        return ignored;
+    }
+    
+    if(currentMem.address != -1 && prevMem.address != -1)
+    {
+        if (currentMem.address % memBanks == prevMem.address % memBanks)
+            return YES;
+        else 
+            return NO;
+    }
+    else
+        return MAYBE;   
+}
+
+// Rule 2
+
+Result Processor::sameMemAddrReg(StageBuffer &currentMem, StageBuffer &prevMem)
+{
+	if( currentMem.IR.sReg1 == prevMem.IR.sReg1 && currentMem.dirtyNo_sReg1 == prevMem.dirtyNo_sReg1)
+	{
+		if(abs(currentMem.IR.offset - prevMem.IR.offset) % memBanks == 0)
+			return YES;
+		else
+			return NO;
+	}
+
+	return MAYBE;
+}
+
+// Rule 3
+
+Result Processor::directAddrRegDependency(StageBuffer &currentMem, StageBuffer &prevMem)
+{
+	if( currentMem.rel.src != -1 && currentMem.rel.src == prevMem.IR.sReg1 && reg[ currentMem.rel.src ].dirtyNo == reg[ prevMem.IR.sReg1 ].dirtyNo)
+	{
+		if(currentMem.rel.op == IADD) 
+		{
+			int arg = currentMem.rel.value + currentMem.IR.offset - prevMem.IR.offset;
+			if(abs(arg) % memBanks == 0)
+				return YES;
+			else
+				return NO;
+		}
+
+		else if (currentMem.rel.op == ISUB)
+		{
+			int arg = 0;
+			if( currentMem.rel.order == SrcOpValue ) 
+			{
+				arg = arg - currentMem.rel.value + currentMem.IR.offset - prevMem.IR.offset;
+
+				if(abs(arg) % memBanks == 0)
+					return YES;
+				else
+					return NO;
+			}
+		}		
+	}
+
+	return MAYBE;
+}
+
+// Rule 4
+
+Result Processor::multiLevelIndirection(StageBuffer &currentMem, StageBuffer &prevMem)
+{
+	if( (currentMem.rel.op == IADD || currentMem.rel.op == ISUB) && 
+		(prevMem.rel.op == IADD || prevMem.rel.op == ISUB) )
+	{
+		//currentMem.rel = getAbsSrc( currentMem.IR.sReg1 );
+		//prevMem.rel = getAbsSrc( prevMem.IR.sReg1 );
+
+		if(currentMem.rel.src == prevMem.rel.src && currentMem.rel.dirtyNo == prevMem.rel.dirtyNo)
+		{
+			if(currentMem.rel.op == IADD && prevMem.rel.op == IADD)
+			{
+				int arg = abs(currentMem.rel.value + currentMem.IR.offset - prevMem.rel.value - prevMem.IR.offset);
+				if(arg % memBanks == 0)
+					return YES;
+				else
+					return NO;
+			}
+			else if(currentMem.rel.op == IADD && isDeducable(prevMem.rel))
+			{
+				int arg = abs(currentMem.rel.value + currentMem.IR.offset + prevMem.rel.value - prevMem.IR.offset);
+				if(arg % memBanks == 0)
+					return YES;
+				else
+					return NO;
+			}
+			else if(isDeducable(currentMem.rel) && prevMem.rel.op == IADD)
+			{
+				int arg = abs(-currentMem.rel.value + currentMem.IR.offset - prevMem.rel.value - prevMem.IR.offset);
+				if(arg % memBanks == 0)
+					return YES;
+				else
+					return NO;
+			}
+			else if(isDeducable(currentMem.rel) && isDeducable(prevMem.rel))
+			{
+				int arg = abs(-currentMem.rel.value + currentMem.IR.offset + prevMem.rel.value - prevMem.IR.offset);
+				if(arg % memBanks == 0)
+					return YES;
+				else
+					return NO;
+			}
+			else if(currentMem.rel.op == ISUB && prevMem.rel.op == ISUB && 
+				    currentMem.rel.order == ValueOpSrc && prevMem.rel.order == ValueOpSrc)
+			{
+				int arg = abs(currentMem.rel.value + currentMem.IR.offset - prevMem.rel.value - prevMem.IR.offset);
+				if(arg % memBanks == 0)
+					return YES;
+				else
+					return NO;
+			}
+		}		
+	}
+
+	return MAYBE;
+}
+
+Relation Processor::getAbsSrc(int reg_index, StageBuffer &buf)
+{	
+	Relation abs_relation;
+	bool can_deduce = isDeducable(rel[ reg_index ]);
+	int parent = rel[ reg_index ].src;
+
+	if(parent == -1 || parent == reg_index || (rel[ reg_index ].op != IADD && rel[ reg_index ].op != ISUB) ) 
+	{		
+		abs_relation.src = reg_index;
+		abs_relation.value = 0;
+		abs_relation.dirtyNo = reg[ reg_index ].dirtyNo;
+		abs_relation.order = SrcOpValue;
+		abs_relation.op = rel[ reg_index ].op;		
+		return abs_relation;
+	}
+
+	int value = 0;
+	Order my_order = SrcOpValue;
+	Type my_op = IADD;
+	abs_relation = getAbsSrc( parent, buf);
+
+	if(rel[ reg_index ].op == ISUB) 
+	{
+		if(abs_relation.op == ISUB)
+		{
+			if(rel[ reg_index ].order == ValueOpSrc)
+			{
+				// l - (k-x)
+				if(abs_relation.order == ValueOpSrc)
+				{
+					value = rel[ reg_index ].value - abs_relation.value;
+					my_order = SrcOpValue;
+					my_op = (value < 0)?ISUB:IADD;
+					value = abs(value);
+				}
+				// l - (x-k)
+				else
+				{
+					value = rel[ reg_index ].value + abs_relation.value;
+					my_order = ValueOpSrc;
+					my_op = ISUB;
+				}
+			}
+			else if(rel[ reg_index ].order == SrcOpValue)
+			{
+				// (k-x) - l
+				if(abs_relation.order == ValueOpSrc)
+				{
+					value = abs_relation.value - rel[ reg_index ].value;
+					my_order = ValueOpSrc;
+					my_op = ISUB;
+				}
+				// (x-k) - l
+				else
+				{
+					value = abs_relation.value + rel[ reg_index ].value;
+					my_order = SrcOpValue;
+					my_op = (value > 0)?ISUB:IADD;
+					value = abs(value);
+				}
+			}
+		}   // if abs_relation.op == ISUB
+		else
+		{
+			// (x+k) - l
+			if(rel[ reg_index ].order == SrcOpValue)
+			{
+				value = abs_relation.value - rel[ reg_index ].value;
+				my_order = SrcOpValue;
+				my_op = (value < 0)?ISUB:IADD;
+				value = abs(value);
+			}
+			// l - (x+k)
+			else
+			{
+				value =  rel[ reg_index ].value - abs_relation.value;
+				my_order = ValueOpSrc;
+				my_op = ISUB;
+			}
+		}
+	}
+
+	else if(rel[ reg_index ].op == IADD)
+	{		
+		if(abs_relation.op == ISUB) 
+		{
+			// l + (k-x)
+			if(abs_relation.order == ValueOpSrc)
+			{
+				value = rel[ reg_index ].value + abs_relation.value;
+				my_order = ValueOpSrc;
+				my_op = ISUB;
+			}
+			// l + (x-k)
+			else
+			{
+				value = rel[ reg_index ].value - abs_relation.value;
+				my_order = SrcOpValue;
+				my_op = (value < 0)?ISUB:IADD;
+				value = abs(value);
+			}
+		}
+		else
+			value = rel[ reg_index ].value + abs_relation.value;
+	}
+
+	abs_relation.op = my_op;
+	abs_relation.order = my_order;
+	abs_relation.value = value;
+	return abs_relation;
+}
+
+void Processor::ID(StageBuffer &buf)
+{
+	buf.str = instructions[PC];
+	buf.PC = PC;
+	// Remove all ',' from instr_temp
+	int loc = buf.str.find(',');
+	while(loc != (int)string::npos) {
+		buf.str[loc] = ' ';
+		loc = buf.str.find(',');
+	}
+
+	// Remove all 'r' from instr_temp
+	loc = buf.str.find('r');
+	while(loc != (int)string::npos) {
+		buf.str[loc] = ' ';
+		loc = buf.str.find('r');
+	}
+
+	istringstream ss(buf.str.c_str());
+	string token;
+	int src = 0;
+	
+	if(ss >> token)
+		IR.type = getEnumFromString(token);	
+	
+	if( IR.type == LW) {
+		if(ss >> token)
+			IR.destReg = atoi(token.c_str());
+		if(ss >> token)
+		{
+			loc = token.find('[');
+			IR.offset = atoi(token.substr(0,loc).c_str());
+			ss >> token;
+			IR.sReg1 = atoi(token.substr(0, token.find(']')).c_str());
+
+			buf.dirtyNo_sReg1 = reg[IR.sReg1].dirtyNo;
+		}
+		src = 1;
+	}	
+	else if( IR.type == SW) {
+		if(ss >> token)
+			IR.destReg = atoi(token.c_str());
+		if(ss >> token)
+		{
+			loc = token.find('[');
+			IR.offset = atoi(token.substr(0,loc).c_str());
+			ss >> token;
+			IR.sReg1 = atoi(token.substr(0, token.find(']')).c_str());	
+
+			buf.dirtyNo_sReg1 = reg[IR.sReg1].dirtyNo;
+		}
+		src = 1;
+	}
+	else if( IR.type == LWI) {
+		if(ss >> token)
+			IR.destReg = atoi(token.c_str());
+		if(ss >> token)
+			IR.value = atoi(token.c_str());
+	}
+	else if( IR.type == IADD || IR.type == ISUB || IR.type == IMUL || IR.type == IDIV || IR.type == IMOD) {
+		if(ss >> token)
+			IR.destReg = atoi(token.c_str());
+		if(ss >> token)
+			IR.sReg1 = atoi(token.c_str());
+		if(ss >> token)
+			IR.sReg2 = atoi(token.c_str());
+		src = 2;
+	}
+	else if( IR.type == ICMP){
+		if(ss >> token)
+			IR.sReg1 = atoi(token.c_str());
+		if(ss >> token)
+			IR.sReg2 = atoi(token.c_str());	
+		src = 2;
+	}
+	else if( IR.type == BNEQ || IR.type ==  BEQ || IR.type == BLT || IR.type == BGT || IR.type == JUMP) {
+		if(ss >> token)
+			IR.offset = atoi(token.c_str());
+
+	}
+	else {  //if(token == "HALT")
+    }
+
+	if(src >= 1)
+		buf.operand1 = this->reg[IR.sReg1].regVal;
+	if(src == 2)
+		buf.operand2 = this->reg[IR.sReg2].regVal;
+
+	if(IR.type == SW)
+		buf.operand2 = this->reg[IR.destReg].regVal;
+
+	buf.IR = IR;
+}
+
+void Processor::setDataForRule3(StageBuffer& buf, Type op)
+{
+	// Rule 3			
+	if( !reg[buf.IR.sReg1].alive && reg[buf.IR.sReg2].alive ) {
+		rel[buf.IR.destReg].set(buf.IR.sReg1, reg[buf.IR.sReg2].regVal, SrcOpValue, op, reg[ buf.IR.sReg1].dirtyNo);
+		buf.rel = rel[buf.IR.destReg];
+	}
+
+	else if( reg[buf.IR.sReg1].alive && !reg[buf.IR.sReg2].alive ) {
+		rel[buf.IR.destReg].set(buf.IR.sReg2, reg[buf.IR.sReg1].regVal, ValueOpSrc, op, reg[ buf.IR.sReg2].dirtyNo);
+		buf.rel = rel[buf.IR.destReg];
+	}
+
+	else if( !reg[buf.IR.sReg1].alive && !reg[buf.IR.sReg2].alive ) {
+		rel[buf.IR.destReg].dirtyNo++;
+		buf.rel.dirtyNo++;
+	}
+}
+
+void Processor::ALU(StageBuffer &buf) {
+    
+    switch (buf.IR.type) 
+    {
+        case LW:
+			// For Rule 2
+			// The destReg register need not be alive
+			reg[buf.IR.destReg].dirtyNo ++;
+
+            if(reg[buf.IR.sReg1].alive)
+            {
+                buf.address = buf.operand1 + buf.IR.offset;
+                //load from memory
+                //if something found at address
+                if (mem.find(buf.address) != mem.end()) 
+                {
+                    memIter = mem.find(buf.address);
+                    buf.result = memIter->second;
+                    reg[buf.IR.destReg].regVal = buf.result;
+                    reg[buf.IR.destReg].alive = true;					
+                }
+            }
+            break;
+
+        case SW:
+            //store in memory
+			if (reg[buf.IR.sReg1].alive) 
+            {
+                buf.address = buf.operand1 + buf.IR.offset;
+                if (reg[buf.IR.destReg].alive && mem.find(buf.address) != mem.end()) 
+                {
+                    memIter = mem.find(buf.address);
+                    memIter->second = buf.operand2;
+                } 
+				else if(reg[buf.IR.destReg].alive)
+                    mem.insert(pair<int, int>(buf.address, buf.operand2));
+            }
+            break;
+
+        case LWI:			
+            buf.result = buf.IR.value;
+            reg[buf.IR.destReg].regVal = buf.result;
+			reg[buf.IR.destReg].dirtyNo ++;			
+            reg[buf.IR.destReg].alive = true;
+            break;
+
+        case IADD:
+			// For Rule 2
+			// Check if the destination register is really dirtied before updating its dirty bit
+			if(buf.IR.destReg != buf.IR.sReg1 &&  buf.IR.destReg != buf.IR.sReg2 && 
+						(buf.IR.sReg1 != 0 || buf.IR.sReg2 != 0)) {
+				reg[buf.IR.destReg].dirtyNo ++;				
+			}
+
+			else if(buf.IR.destReg == buf.IR.sReg1 && buf.IR.sReg2 != 0)
+				reg[buf.IR.destReg].dirtyNo ++;
+
+			else if(buf.IR.destReg == buf.IR.sReg2 && buf.IR.sReg1 != 0)
+				reg[buf.IR.destReg].dirtyNo ++;
+			
+			// Rule 3
+			setDataForRule3(buf, IADD);
+
+			if( reg[buf.IR.sReg1].alive && reg[buf.IR.sReg2].alive )
+			{
+				buf.result = buf.operand1 + buf.operand2;
+				reg[buf.IR.destReg].regVal = buf.result;
+				reg[buf.IR.destReg].alive = true;        
+			}
+            break;
+
+        case ISUB:
+			// For Rule 2
+			// Check if the destination register is really dirtied before updating its dirty bit
+
+			if(buf.IR.destReg != buf.IR.sReg1 &&  buf.IR.destReg != buf.IR.sReg2 && 
+						(buf.IR.sReg1 != 0 || buf.IR.sReg2 != 0))
+				reg[buf.IR.destReg].dirtyNo ++;
+
+			else if(buf.IR.destReg == buf.IR.sReg1 && buf.IR.sReg2 != 0)
+				reg[buf.IR.destReg].dirtyNo ++;
+
+			else if(buf.IR.destReg == buf.IR.sReg2)
+				reg[buf.IR.destReg].dirtyNo ++;
+
+			// Rule 3
+			setDataForRule3(buf, ISUB);
+
+			if( reg[buf.IR.sReg1].alive && reg[buf.IR.sReg2].alive )
+			{
+				buf.result = buf.operand1 - buf.operand2;
+				reg[buf.IR.destReg].regVal = buf.result;
+				reg[buf.IR.destReg].alive = true;         
+			}
+            break;
+
+        case IMUL:            
+			// For Rule 2
+			reg[buf.IR.destReg].dirtyNo ++;
+
+			// Rule 3
+			setDataForRule3(buf, IMUL);
+
+			if( reg[buf.IR.sReg1].alive && reg[buf.IR.sReg2].alive )
+			{
+				buf.result = buf.operand1 * buf.operand2;
+				reg[buf.IR.destReg].regVal = buf.result;
+				reg[buf.IR.destReg].alive = true;          
+			}
+            break;
+
+        case IDIV: 
+			// For Rule 2
+			reg[buf.IR.destReg].dirtyNo ++;
+
+			// Rule 3
+			setDataForRule3(buf, IDIV);
+
+			if( reg[buf.IR.sReg1].alive && reg[buf.IR.sReg2].alive )
+			{
+				buf.result = buf.operand1 / buf.operand2;
+				reg[buf.IR.destReg].regVal = buf.result;
+				reg[buf.IR.destReg].alive = true;            
+			}
+            break;
+
+        case IMOD:       
+			// For Rule 2
+			reg[buf.IR.destReg].dirtyNo ++;
+
+			// Rule 3
+			setDataForRule3(buf, IMOD);
+
+			if( reg[buf.IR.sReg1].alive && reg[buf.IR.sReg2].alive )
+			{
+				buf.result = buf.operand1 % buf.operand2;
+				reg[buf.IR.destReg].regVal = buf.result;
+				reg[buf.IR.destReg].alive = true;            
+			}
+            break;
+
+        default:
+            // ICMP | BNEQ | BEQ | BLT | BGT | JUMP
+            break;
+    }    
+}	
+
+

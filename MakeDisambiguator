@@ -1,0 +1,4 @@
+#please adapt for you own files
+cd src                                  #go into src directory
+g++ Instruction.cpp Retriever.cpp Types.cpp Processor.cpp main.cpp -Wall -o ../bin/DISAMBIGUATOR.exe    #compile the source files
+cd ..
